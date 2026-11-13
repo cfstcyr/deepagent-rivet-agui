@@ -10,7 +10,7 @@ libraries for all protocol mapping and only glue code of our own?
 
 ## How to run
 
-Node 24 through mise. `.env` must hold `OPENROUTER_API_KEY`.
+Node 24 through mise. Copy `.env.example` to `.env` and set `OPENROUTER_API_KEY`.
 
 ```sh
 mise exec -- npm install
@@ -39,7 +39,8 @@ I chose the animal **axolotl** and the color **emerald**.
 
 - Text streams as `TEXT_MESSAGE_CONTENT` deltas. Tool calls cross the wire as
   `TOOL_CALL_START/ARGS/END` and `TOOL_CALL_RESULT`. `STEP_*`, `STATE_SNAPSHOT` (includes the deep agent's
-  `files`), `MESSAGES_SNAPSHOT`, `RUN_STARTED/FINISHED` and `RAW` events arrive too.
+  `files`), `MESSAGES_SNAPSHOT` and `RUN_STARTED/FINISHED` arrive too. `RAW` events are turned off
+  (`emitRawEvents: false`); by default every LangGraph event would also be sent as `RAW`.
 - Memory is server-side: the client builds a new `HttpAgent` for each turn, so turn 2 only sends the new
   question. The answer can only come from the actor's `MemorySaver`.
 - The client POSTs straight to the Rivet gateway. The actor key is the thread id, so each thread gets its
@@ -70,10 +71,21 @@ Library vs glue:
 
 No LangGraph event is mapped by hand.
 
+Alternatives considered:
+
+- LangChain's own protocol instead of AG-UI: the embed server already speaks it, so the actor could just do
+  `onRequest: (c, req) => c.vars.app.fetch(req)` and the client use `@langchain/langgraph-sdk` `Client`
+  (about 35 server lines instead of 76, no AG-UI packages, no stubs). Rejected as the main path because it
+  proves a LangChain-only protocol, not AG-UI, which CopilotKit and other AG-UI clients use. Good fallback.
+- `langgraph dev` in front of everything: no glue, but Rivet then does nothing.
+- An actor action that broadcasts events plus a separate `POST /agent` server: more glue, and the events
+  would be mapped by hand.
+
 Caveats:
 
-- `createEmbedServer` is `@experimental` and does not follow semver. It also has no `/assistants`
-  routes, hence the stub. `@ag-ui/langgraph` calls `assistants.search` (reads `assistant_id`, `graph_id`,
+- Main risk, experimental coupling: `createEmbedServer` is `@experimental` and does not follow semver,
+  and the stubs depend on what `@ag-ui/langgraph` 0.0.x happens to call. A bump of either can break it;
+  versions are pinned exactly. The embed server has no `/assistants` routes, hence the stub. `@ag-ui/langgraph` calls `assistants.search` (reads `assistant_id`, `graph_id`,
   `config`), `assistants.getGraph` (`nodes` drive the `STEP_*` events, `edges` are used to resume an interrupt) and
   `assistants.getSchemas` (reads `input/output/config/context_schema.properties` keys; `output_schema`
   decides which state keys, such as `files` and `todos`, appear in `STATE_SNAPSHOT`).
@@ -82,18 +94,22 @@ Caveats:
   and thread store, for example on the actor's SQLite `db`.
 - The gateway URL format (`/gateway/<actor>/request/<path>?rvt-namespace=…&rvt-method=getOrCreate&rvt-key=…&rvt-token=default`)
   comes from the rivetkit source, not from the docs. `rvt-token=default` only works on the local dev engine.
-  The documented route is `client.agent.getOrCreate([threadId]).fetch(...)` from `rivetkit/client`, which
-  needs a server-side proxy for a non-Rivet client.
+  The documented route is `client.agent.getOrCreate([threadId]).fetch(...)` from `rivetkit/client`. Using it
+  means either a server-side proxy or importing `rivetkit` in the client (as `HttpAgent`'s `fetch` option),
+  which would make the client depend on more than an AG-UI library.
 - `LangGraphAgent.clone()` is typed `any`, so we cast it. We clone for each request because the adapter keeps
   per-run state on the instance.
 - On client disconnect, the stream's `cancel` calls `abortRun()` (which calls `runs.cancel` on the embed
   server) and unsubscribes. Tested: the server survives a mid-run disconnect. Whether the graph run itself
   stops right away was not checked. Concurrent runs on the same thread are not rejected: the embed
   `/runs/stream` route doesn't check for an active run.
-- `emitRawEvents` defaults to true, so every LangGraph event is also sent as `RAW`, which makes the stream
-  heavy. Set `emitRawEvents: false` on `LangGraphAgent` to turn it off.
+- `STATE_SNAPSHOT` is chatty: `@ag-ui/langgraph` 0.0.46 sends one at each node transition, so a deep agent
+  produces dozens even for "Say hi." (39 in one run), each with the full output-schema state (`files`,
+  `todos`). No adapter option turns it down, and filtering on the server would be hand-written protocol
+  logic. Clients that don't need state ignore the event.
 - `openai/gpt-oss-120b` often skips `write_todos`. Sometimes it prints the todo JSON as text instead of
-  calling the tool. That comes from the model, not the transport: `write_file` is called reliably. Nothing
+  calling the tool, and in one run it did the same for `write_file`. That comes from the model, not the
+  transport. Nothing
   Anthropic-specific got in the way. npm auto-installs `@langchain/anthropic` as a deepagents peer
   dependency, but it is unused.
 - By default RivetKit stores engine data in `~/.rivetkit`. The `server` script sets

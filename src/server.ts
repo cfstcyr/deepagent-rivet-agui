@@ -45,7 +45,7 @@ function createAguiAgent() {
 
   // Real SDK client, but its HTTP goes straight into the Hono app (no socket).
   const client = new Client({ apiUrl: "http://embedded", apiKey: null, callerOptions: { fetch: (url: string, init: RequestInit) => app.fetch(new Request(url, init)) } });
-  return new LangGraphAgent({ client, graphId: "agent", deploymentUrl: "http://embedded" });
+  return new LangGraphAgent({ client, graphId: "agent", deploymentUrl: "http://embedded", emitRawEvents: false });
 }
 
 const agent = actor({
